@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Warn when formula cells are blank due to uncached xlsx values (`NOTE:` before table, suggests `--formulas` or re-saving in Excel/LibreOffice)
 
 ### Changed
+- Upgrade `calamine` 0.26 → 0.34 and `dirs` 5.0 → 6.0 for Debian packaging compatibility (thanks [@nadzyah](https://github.com/nadzyah)! [#43](https://github.com/bgreenwell/xleak/pull/43))
 - Nix flake version now read dynamically from Cargo.toml; homepage URL fixed
 - Replaced `prettytable-rs` with `comfy-table` for non-interactive output, enabling correct multiline cell wrapping with `--wrap` ([#44](https://github.com/bgreenwell/xleak/pull/44))
 - Non-interactive table output: green bold headers, red errors, green formula-mode cells
