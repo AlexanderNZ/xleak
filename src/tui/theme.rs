@@ -3,6 +3,43 @@ use crate::workbook::CellValue;
 use anyhow::Result;
 use ratatui::style::Color;
 
+/// Single source of truth for the 20 customizable color fields.
+///
+/// Each row is `[field_name, kind, alias]` where:
+///   kind:  `plain` = `Color` in ColorScheme, `opt` = `Option<Color>`
+///   alias: `fg` = set by the `foreground` alias, `bg` = by `background`, `none` = excluded
+///
+/// This table drives `CustomTheme` (config.rs), `apply_custom_fields`, and
+/// `uses_rgb` so that adding a `ColorScheme` field in one place can't silently
+/// miss the others.
+macro_rules! color_field_table {
+    ($mac:ident) => {
+        $mac! {
+            [string_fg,          plain, fg]
+            [number_fg,          plain, fg]
+            [bool_fg,            plain, fg]
+            [datetime_fg,        plain, fg]
+            [error_fg,           plain, fg]
+            [empty_fg,           plain, fg]
+            [header_fg,          plain, fg]
+            [header_bg,          opt,   bg]
+            [current_cell_fg,    plain, none]
+            [current_cell_bg,    plain, none]
+            [current_row_bg,     plain, none]
+            [current_col_fg,     plain, none]
+            [alternating_row_bg, opt,   bg]
+            [search_match_fg,    plain, none]
+            [search_match_bg,    plain, none]
+            [current_search_fg,  plain, none]
+            [current_search_bg,  plain, none]
+            [border_fg,          plain, fg]
+            [status_bar_fg,      plain, fg]
+            [status_bar_bg,      opt,   bg]
+        }
+    };
+}
+pub(crate) use color_field_table;
+
 /// A color scheme with the name users refer to it by, in config and in the
 /// status bar. Built-ins and `[[theme.custom]]` entries are the same shape, so
 /// theme cycling doesn't care where a theme came from.
@@ -169,65 +206,30 @@ fn resolve_base(themes: &[NamedTheme], custom: &CustomTheme) -> Result<ColorSche
 
 /// Apply a custom theme's fields over a base scheme.
 ///
-/// The `foreground`/`background` aliases only touch elements meant to look
-/// uniform. Anything whose job is to stand out — the cursor cell, the current
-/// row and column, search highlights — is deliberately excluded so it keeps the
-/// contrast the parent theme designed in. Users who want those changed set them
-/// explicitly, which the per-field overrides below still allow.
+/// The `foreground`/`background` aliases only touch elements tagged `fg`/`bg`
+/// in `color_field_table!`. Anything tagged `none` (cursor, search, row
+/// highlight) keeps the contrast the parent theme designed in.
 fn apply_custom_fields(mut colors: ColorScheme, custom: &CustomTheme) -> ColorScheme {
-    if let Some(fg) = custom.foreground {
-        colors.string_fg = fg;
-        colors.number_fg = fg;
-        colors.bool_fg = fg;
-        colors.datetime_fg = fg;
-        colors.error_fg = fg;
-        colors.empty_fg = fg;
-        colors.header_fg = fg;
-        colors.border_fg = fg;
-        colors.status_bar_fg = fg;
-    }
-    if let Some(bg) = custom.background {
-        colors.header_bg = Some(bg);
-        colors.alternating_row_bg = Some(bg);
-        colors.status_bar_bg = Some(bg);
-    }
-
-    macro_rules! apply {
-        ($field:ident) => {
-            if let Some(c) = custom.$field {
-                colors.$field = c;
+    macro_rules! impl_apply {
+        ( $( [$field:ident, $kind:ident, $alias:ident] )* ) => {
+            // Broad-brush aliases first.
+            if let Some(fg) = custom.foreground {
+                $( impl_apply!(@fg colors, $field, fg, $alias); )*
             }
-        };
-    }
-    macro_rules! apply_opt {
-        ($field:ident) => {
-            if let Some(c) = custom.$field {
-                colors.$field = Some(c);
+            if let Some(bg) = custom.background {
+                $( impl_apply!(@bg colors, $field, bg, $alias); )*
             }
+            // Per-field overrides on top.
+            $( impl_apply!(@field colors, custom, $field, $kind); )*
         };
+        (@fg $colors:ident, $field:ident, $val:ident, fg)   => { $colors.$field = $val; };
+        (@fg $colors:ident, $field:ident, $val:ident, $t:ident) => {};
+        (@bg $colors:ident, $field:ident, $val:ident, bg)   => { $colors.$field = Some($val); };
+        (@bg $colors:ident, $field:ident, $val:ident, $t:ident) => {};
+        (@field $c:ident, $cu:ident, $f:ident, plain) => { if let Some(v) = $cu.$f { $c.$f = v; } };
+        (@field $c:ident, $cu:ident, $f:ident, opt)   => { if let Some(v) = $cu.$f { $c.$f = Some(v); } };
     }
-
-    apply!(string_fg);
-    apply!(number_fg);
-    apply!(bool_fg);
-    apply!(datetime_fg);
-    apply!(error_fg);
-    apply!(empty_fg);
-    apply!(header_fg);
-    apply_opt!(header_bg);
-    apply!(current_cell_fg);
-    apply!(current_cell_bg);
-    apply!(current_row_bg);
-    apply!(current_col_fg);
-    apply_opt!(alternating_row_bg);
-    apply!(search_match_fg);
-    apply!(search_match_bg);
-    apply!(current_search_fg);
-    apply!(current_search_bg);
-    apply!(border_fg);
-    apply!(status_bar_fg);
-    apply_opt!(status_bar_bg);
-
+    color_field_table!(impl_apply);
     colors
 }
 
@@ -497,28 +499,14 @@ impl ColorScheme {
 
     /// Whether any field uses `Color::Rgb`, which requires 24-bit color support.
     pub fn uses_rgb(&self) -> bool {
-        let all = [
-            self.string_fg,
-            self.number_fg,
-            self.bool_fg,
-            self.datetime_fg,
-            self.error_fg,
-            self.empty_fg,
-            self.header_fg,
-            self.current_cell_fg,
-            self.current_cell_bg,
-            self.current_row_bg,
-            self.current_col_fg,
-            self.search_match_fg,
-            self.search_match_bg,
-            self.current_search_fg,
-            self.current_search_bg,
-            self.border_fg,
-            self.status_bar_fg,
-        ];
-        let opts = [self.header_bg, self.alternating_row_bg, self.status_bar_bg];
-        all.iter().any(|c| matches!(c, Color::Rgb(..)))
-            || opts.iter().any(|o| matches!(o, Some(Color::Rgb(..))))
+        macro_rules! impl_uses_rgb {
+            ( $( [$field:ident, $kind:ident, $alias:ident] )* ) => {
+                $( impl_uses_rgb!(@check self, $field, $kind) || )* false
+            };
+            (@check $s:ident, $f:ident, plain) => { matches!($s.$f, Color::Rgb(..)) };
+            (@check $s:ident, $f:ident, opt)   => { matches!($s.$f, Some(Color::Rgb(..))) };
+        }
+        color_field_table!(impl_uses_rgb)
     }
 
     /// Get foreground color for a cell based on its value type

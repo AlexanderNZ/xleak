@@ -5,6 +5,7 @@ mod state;
 mod theme;
 
 pub use event::run_tui;
+pub(crate) use theme::color_field_table;
 pub use theme::resolve_themes_from_config;
 pub use theme::truecolor_warning;
 
