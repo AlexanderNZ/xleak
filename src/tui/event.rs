@@ -10,6 +10,7 @@ use std::io;
 use std::time::Duration;
 
 use super::state::TuiState;
+use super::theme::ThemeSet;
 
 impl TuiState {
     /// Check if a key press matches a configured action
@@ -149,7 +150,7 @@ impl TuiState {
                 self.show_help = true;
                 self.help_scroll = 0;
             } else if self.key_matches(code, modifiers, "theme_toggle") {
-                self.current_theme = self.current_theme.next();
+                self.themes.cycle();
             } else if self.key_matches(code, modifiers, "search") {
                 self.search_mode = true;
                 self.clear_search();
@@ -236,6 +237,14 @@ pub fn run_tui(
         );
     }
 
+    // Resolve themes before touching the terminal: a bad `inherits` should fail
+    // with a readable message, and warnings written after EnterAlternateScreen
+    // would be mangled by raw mode and then wiped by the first draw.
+    let (themes, warnings) = ThemeSet::resolve(&config.theme)?;
+    for warning in &warnings {
+        eprintln!("Warning: {warning}");
+    }
+
     // Restore the terminal before the panic message prints, so it lands on a
     // readable screen instead of vanishing into the alternate buffer.
     let original_hook = std::panic::take_hook();
@@ -258,6 +267,7 @@ pub fn run_tui(
         workbook,
         sheet_name,
         config,
+        themes,
         horizontal_scroll,
         no_header,
         no_column_id,

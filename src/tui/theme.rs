@@ -1,60 +1,214 @@
+use crate::config::{CustomTheme, ThemeConfig};
 use crate::workbook::CellValue;
+use anyhow::Result;
 use ratatui::style::Color;
 
-/// Available themes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Theme {
-    Default,
-    Dracula,
-    SolarizedDark,
-    SolarizedLight,
-    GitHubDark,
-    Nord,
+/// A color scheme with the name users refer to it by, in config and in the
+/// status bar. Built-ins and `[[theme.custom]]` entries are the same shape, so
+/// theme cycling doesn't care where a theme came from.
+#[derive(Debug, Clone)]
+pub struct NamedTheme {
+    pub name: String,
+    pub colors: ColorScheme,
 }
 
-impl Theme {
-    /// Get all available themes
-    pub fn all() -> &'static [Theme] {
-        &[
-            Theme::Default,
-            Theme::Dracula,
-            Theme::SolarizedDark,
-            Theme::SolarizedLight,
-            Theme::GitHubDark,
-            Theme::Nord,
-        ]
+/// Theme names are matched loosely, so `"Solarized Dark"`, `"solarized_dark"`,
+/// and `"solarizeddark"` all refer to the same theme.
+fn normalized(name: &str) -> String {
+    name.trim().to_lowercase().replace(' ', "")
+}
+
+/// Returns the built-in themes in cycle order.
+pub fn builtin_themes() -> Vec<NamedTheme> {
+    vec![
+        NamedTheme {
+            name: "Default".into(),
+            colors: ColorScheme::default_theme(),
+        },
+        NamedTheme {
+            name: "Dracula".into(),
+            colors: ColorScheme::dracula(),
+        },
+        NamedTheme {
+            name: "Solarized Dark".into(),
+            colors: ColorScheme::solarized_dark(),
+        },
+        NamedTheme {
+            name: "Solarized Light".into(),
+            colors: ColorScheme::solarized_light(),
+        },
+        NamedTheme {
+            name: "GitHub Dark".into(),
+            colors: ColorScheme::github_dark(),
+        },
+        NamedTheme {
+            name: "Nord".into(),
+            colors: ColorScheme::nord(),
+        },
+    ]
+}
+
+/// Every theme available this run, plus which one is active.
+///
+/// Invariants: `themes` is never empty (it always contains the built-ins) and
+/// `current` is always a valid index, so `current()` cannot panic.
+#[derive(Debug, Clone)]
+pub struct ThemeSet {
+    themes: Vec<NamedTheme>,
+    current: usize,
+}
+
+impl ThemeSet {
+    /// Build the theme list from config and select the startup theme.
+    ///
+    /// Fails only on an unresolvable `inherits`. An unknown `theme.default` is
+    /// recoverable, so it comes back as a warning string rather than an error —
+    /// callers print those *before* entering the alternate screen, where
+    /// stderr is still visible to the user.
+    pub fn resolve(config: &ThemeConfig) -> Result<(Self, Vec<String>)> {
+        let themes = resolve_themes(&config.custom)?;
+        let mut warnings = Vec::new();
+
+        let current = match find_index(&themes, &config.default) {
+            Some(idx) => idx,
+            None => {
+                warnings.push(format!(
+                    "theme '{}' not found, falling back to 'Default'",
+                    config.default
+                ));
+                0
+            }
+        };
+
+        Ok((Self { themes, current }, warnings))
     }
 
-    /// Get the next theme in the cycle
-    pub fn next(&self) -> Theme {
-        let themes = Self::all();
-        let current_idx = themes.iter().position(|t| t == self).unwrap_or(0);
-        themes[(current_idx + 1) % themes.len()]
+    /// Colors for the active theme.
+    pub fn current(&self) -> &ColorScheme {
+        &self.themes[self.current].colors
     }
 
-    /// Get theme name for display
-    pub fn name(&self) -> &'static str {
-        match self {
-            Theme::Default => "Default",
-            Theme::Dracula => "Dracula",
-            Theme::SolarizedDark => "Solarized Dark",
-            Theme::SolarizedLight => "Solarized Light",
-            Theme::GitHubDark => "GitHub Dark",
-            Theme::Nord => "Nord",
+    /// Display name of the active theme.
+    pub fn current_name(&self) -> &str {
+        &self.themes[self.current].name
+    }
+
+    /// Advance to the next theme, wrapping. Built-ins come first, then customs
+    /// in the order they appear in config.
+    pub fn cycle(&mut self) {
+        self.current = (self.current + 1) % self.themes.len();
+    }
+}
+
+/// Case- and space-insensitive lookup of a theme by name.
+fn find_index(themes: &[NamedTheme], name: &str) -> Option<usize> {
+    let needle = normalized(name);
+    themes.iter().position(|t| normalized(&t.name) == needle)
+}
+
+/// Merge custom themes onto the built-ins.
+///
+/// Customs are resolved in config order, so a theme can only inherit from one
+/// defined before it. That ordering requirement is what makes circular
+/// `inherits` chains unrepresentable rather than something we have to detect.
+/// A custom sharing a built-in's name replaces it in place, keeping cycle order
+/// stable.
+pub fn resolve_themes(custom_themes: &[CustomTheme]) -> Result<Vec<NamedTheme>> {
+    let mut themes = builtin_themes();
+
+    for custom in custom_themes {
+        let colors = apply_custom_fields(resolve_base(&themes, custom)?, custom);
+        match find_index(&themes, &custom.name) {
+            Some(idx) => themes[idx].colors = colors,
+            None => themes.push(NamedTheme {
+                name: custom.name.clone(),
+                colors,
+            }),
         }
     }
 
-    /// Get the color scheme for this theme
-    pub fn colors(&self) -> ColorScheme {
-        match self {
-            Theme::Default => ColorScheme::default_theme(),
-            Theme::Dracula => ColorScheme::dracula(),
-            Theme::SolarizedDark => ColorScheme::solarized_dark(),
-            Theme::SolarizedLight => ColorScheme::solarized_light(),
-            Theme::GitHubDark => ColorScheme::github_dark(),
-            Theme::Nord => ColorScheme::nord(),
-        }
+    Ok(themes)
+}
+
+/// The scheme a custom theme starts from before its own fields are applied.
+fn resolve_base(themes: &[NamedTheme], custom: &CustomTheme) -> Result<ColorScheme> {
+    let Some(ref parent_name) = custom.inherits else {
+        return Ok(ColorScheme::default_theme());
+    };
+
+    let idx = find_index(themes, parent_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Theme '{}' referenced in 'inherits' not found. \
+             If it's a custom theme, make sure it appears earlier in [[theme.custom]].",
+            parent_name
+        )
+    })?;
+
+    Ok(themes[idx].colors.clone())
+}
+
+/// Apply a custom theme's fields over a base scheme.
+///
+/// The `foreground`/`background` aliases only touch elements meant to look
+/// uniform. Anything whose job is to stand out — the cursor cell, the current
+/// row and column, search highlights — is deliberately excluded so it keeps the
+/// contrast the parent theme designed in. Users who want those changed set them
+/// explicitly, which the per-field overrides below still allow.
+fn apply_custom_fields(mut colors: ColorScheme, custom: &CustomTheme) -> ColorScheme {
+    if let Some(fg) = custom.foreground {
+        colors.string_fg = fg;
+        colors.number_fg = fg;
+        colors.bool_fg = fg;
+        colors.datetime_fg = fg;
+        colors.error_fg = fg;
+        colors.empty_fg = fg;
+        colors.header_fg = fg;
+        colors.border_fg = fg;
+        colors.status_bar_fg = fg;
     }
+    if let Some(bg) = custom.background {
+        colors.header_bg = Some(bg);
+        colors.alternating_row_bg = Some(bg);
+        colors.status_bar_bg = Some(bg);
+    }
+
+    macro_rules! apply {
+        ($field:ident) => {
+            if let Some(c) = custom.$field {
+                colors.$field = c;
+            }
+        };
+    }
+    macro_rules! apply_opt {
+        ($field:ident) => {
+            if let Some(c) = custom.$field {
+                colors.$field = Some(c);
+            }
+        };
+    }
+
+    apply!(string_fg);
+    apply!(number_fg);
+    apply!(bool_fg);
+    apply!(datetime_fg);
+    apply!(error_fg);
+    apply!(empty_fg);
+    apply!(header_fg);
+    apply_opt!(header_bg);
+    apply!(current_cell_fg);
+    apply!(current_cell_bg);
+    apply!(current_row_bg);
+    apply!(current_col_fg);
+    apply_opt!(alternating_row_bg);
+    apply!(search_match_fg);
+    apply!(search_match_bg);
+    apply!(current_search_fg);
+    apply!(current_search_bg);
+    apply!(border_fg);
+    apply!(status_bar_fg);
+    apply_opt!(status_bar_bg);
+
+    colors
 }
 
 /// Color scheme for the TUI
@@ -298,5 +452,275 @@ impl ColorScheme {
             CellValue::Error(_) => self.error_fg,
             CellValue::DateTime(_) => self.datetime_fg,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUILTIN_COUNT: usize = 6;
+
+    /// Look a theme up by name so tests don't depend on cycle position.
+    fn colors_of<'a>(themes: &'a [NamedTheme], name: &str) -> &'a ColorScheme {
+        let idx = find_index(themes, name).unwrap_or_else(|| panic!("no theme named '{name}'"));
+        &themes[idx].colors
+    }
+
+    fn custom(name: &str) -> CustomTheme {
+        CustomTheme {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    // =========================================================================
+    // Theme Resolution
+    // =========================================================================
+
+    #[test]
+    fn resolve_themes_without_customs_returns_builtins() {
+        let themes = resolve_themes(&[]).unwrap();
+        assert_eq!(themes.len(), BUILTIN_COUNT);
+        assert_eq!(themes[0].name, "Default");
+        assert_eq!(themes[BUILTIN_COUNT - 1].name, "Nord");
+    }
+
+    #[test]
+    fn custom_replaces_builtin_of_same_name_in_place() {
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("Dracula".into()),
+            string_fg: Some(Color::Green),
+            ..custom("Dracula")
+        }])
+        .unwrap();
+
+        // Replaced, not appended, so cycle order is unchanged.
+        assert_eq!(themes.len(), BUILTIN_COUNT);
+        assert_eq!(themes[1].name, "Dracula");
+
+        let c = colors_of(&themes, "Dracula");
+        assert_eq!(c.string_fg, Color::Green);
+        // Untouched fields still come from Dracula, not from Default.
+        assert_eq!(c.number_fg, Color::Rgb(189, 147, 249));
+    }
+
+    #[test]
+    fn custom_with_new_name_is_appended() {
+        let themes = resolve_themes(&[custom("Brand New")]).unwrap();
+        assert_eq!(themes.len(), BUILTIN_COUNT + 1);
+        assert_eq!(themes[BUILTIN_COUNT].name, "Brand New");
+    }
+
+    #[test]
+    fn custom_can_inherit_an_earlier_custom() {
+        let themes = resolve_themes(&[
+            CustomTheme {
+                inherits: Some("Nord".into()),
+                string_fg: Some(Color::Rgb(1, 2, 3)),
+                ..custom("parent")
+            },
+            CustomTheme {
+                inherits: Some("parent".into()),
+                number_fg: Some(Color::Rgb(4, 5, 6)),
+                ..custom("child")
+            },
+        ])
+        .unwrap();
+
+        let c = colors_of(&themes, "child");
+        assert_eq!(c.string_fg, Color::Rgb(1, 2, 3), "inherited from parent");
+        assert_eq!(c.number_fg, Color::Rgb(4, 5, 6), "own field");
+        assert_eq!(c.bool_fg, Color::Rgb(180, 142, 173), "from Nord via parent");
+    }
+
+    #[test]
+    fn inherits_unknown_theme_is_an_error() {
+        let err = resolve_themes(&[CustomTheme {
+            inherits: Some("NonExistent".into()),
+            ..custom("Bad")
+        }])
+        .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn inheriting_a_later_custom_is_an_error() {
+        // Forward references are rejected; that's what rules out cycles.
+        let err = resolve_themes(&[
+            CustomTheme {
+                inherits: Some("second".into()),
+                ..custom("first")
+            },
+            custom("second"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("appears earlier"));
+    }
+
+    #[test]
+    fn theme_names_match_loosely() {
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("solarizeddark".into()),
+            ..custom("loose")
+        }])
+        .unwrap();
+        assert_eq!(
+            colors_of(&themes, "loose").number_fg,
+            Color::Rgb(38, 139, 210),
+            "'solarizeddark' should resolve to 'Solarized Dark'"
+        );
+    }
+
+    // =========================================================================
+    // foreground / background aliases
+    // =========================================================================
+
+    #[test]
+    fn foreground_alias_sets_uniform_fields_and_yields_to_explicit_fields() {
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("Default".into()),
+            foreground: Some(Color::Blue),
+            string_fg: Some(Color::Red),
+            ..custom("AliasTest")
+        }])
+        .unwrap();
+
+        let c = colors_of(&themes, "AliasTest");
+        assert_eq!(c.number_fg, Color::Blue);
+        assert_eq!(c.header_fg, Color::Blue);
+        assert_eq!(c.border_fg, Color::Blue);
+        assert_eq!(c.status_bar_fg, Color::Blue);
+        assert_eq!(c.string_fg, Color::Red, "explicit field wins over alias");
+    }
+
+    #[test]
+    fn background_alias_sets_uniform_fields_and_yields_to_explicit_fields() {
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("Default".into()),
+            background: Some(Color::Rgb(10, 10, 10)),
+            current_row_bg: Some(Color::Rgb(30, 30, 30)),
+            ..custom("BgTest")
+        }])
+        .unwrap();
+
+        let c = colors_of(&themes, "BgTest");
+        assert_eq!(c.header_bg, Some(Color::Rgb(10, 10, 10)));
+        assert_eq!(c.alternating_row_bg, Some(Color::Rgb(10, 10, 10)));
+        assert_eq!(c.status_bar_bg, Some(Color::Rgb(10, 10, 10)));
+        assert_eq!(c.current_row_bg, Color::Rgb(30, 30, 30), "explicit wins");
+    }
+
+    /// Regression test for the alias bug found in review: setting only
+    /// `background` used to collapse `current_row_bg` and `current_cell_bg` onto
+    /// it, so the cursor row became invisible. Generalised to every element whose
+    /// job is to contrast against the bulk of the table.
+    #[test]
+    fn aliases_never_flatten_the_elements_that_provide_contrast() {
+        let fg = Color::Rgb(192, 202, 245);
+        let bg = Color::Rgb(26, 27, 38);
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("Default".into()),
+            foreground: Some(fg),
+            background: Some(bg),
+            ..custom("NavTest")
+        }])
+        .unwrap();
+
+        let c = colors_of(&themes, "NavTest");
+        let default = ColorScheme::default_theme();
+
+        for (label, got, inherited) in [
+            ("current_row_bg", c.current_row_bg, default.current_row_bg),
+            (
+                "current_cell_bg",
+                c.current_cell_bg,
+                default.current_cell_bg,
+            ),
+            (
+                "current_cell_fg",
+                c.current_cell_fg,
+                default.current_cell_fg,
+            ),
+            ("current_col_fg", c.current_col_fg, default.current_col_fg),
+            (
+                "search_match_fg",
+                c.search_match_fg,
+                default.search_match_fg,
+            ),
+            (
+                "search_match_bg",
+                c.search_match_bg,
+                default.search_match_bg,
+            ),
+            (
+                "current_search_fg",
+                c.current_search_fg,
+                default.current_search_fg,
+            ),
+            (
+                "current_search_bg",
+                c.current_search_bg,
+                default.current_search_bg,
+            ),
+        ] {
+            assert_eq!(
+                got, inherited,
+                "{label} should inherit, not follow an alias"
+            );
+            assert_ne!(got, fg, "{label} was flattened onto the foreground alias");
+            assert_ne!(got, bg, "{label} was flattened onto the background alias");
+        }
+
+        // The specific collapse from the review: these must stay distinguishable.
+        assert_ne!(c.current_row_bg, c.current_cell_bg);
+    }
+
+    // =========================================================================
+    // ThemeSet
+    // =========================================================================
+
+    #[test]
+    fn resolve_selects_the_configured_default() {
+        let cfg = ThemeConfig {
+            default: "nord".into(),
+            custom: Vec::new(),
+        };
+        let (set, warnings) = ThemeSet::resolve(&cfg).unwrap();
+        assert_eq!(set.current_name(), "Nord");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_warns_and_falls_back_when_default_is_unknown() {
+        let cfg = ThemeConfig {
+            default: "nope".into(),
+            custom: Vec::new(),
+        };
+        let (set, warnings) = ThemeSet::resolve(&cfg).unwrap();
+        assert_eq!(set.current_name(), "Default");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("nope"));
+    }
+
+    #[test]
+    fn cycle_visits_every_theme_and_wraps() {
+        let cfg = ThemeConfig {
+            default: "Default".into(),
+            custom: vec![custom("mine")],
+        };
+        let (mut set, _) = ThemeSet::resolve(&cfg).unwrap();
+
+        let mut seen = vec![set.current_name().to_string()];
+        for _ in 0..BUILTIN_COUNT {
+            set.cycle();
+            seen.push(set.current_name().to_string());
+        }
+
+        // Built-ins first, then customs, then back to the start.
+        assert_eq!(seen.first().unwrap(), "Default");
+        assert_eq!(seen[BUILTIN_COUNT], "mine", "customs cycle after built-ins");
+        set.cycle();
+        assert_eq!(set.current_name(), "Default", "wraps around");
     }
 }
