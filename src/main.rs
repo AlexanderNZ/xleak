@@ -174,10 +174,12 @@ fn main() -> Result<()> {
             wb,
             &sheet_name,
             &config,
-            cli.horizontal_scroll,
-            cli.no_header,
-            cli.no_column_id,
-            cli.no_row_id,
+            &tui::TuiOptions {
+                horizontal_scroll: cli.horizontal_scroll,
+                no_header: cli.no_header,
+                no_column_id: cli.no_column_id,
+                no_row_id: cli.no_row_id,
+            },
         )?;
     } else {
         // Load the sheet data for non-interactive modes

@@ -9,6 +9,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::time::Duration;
 
+use super::TuiOptions;
 use super::state::TuiState;
 use super::theme::ThemeSet;
 
@@ -223,10 +224,7 @@ pub fn run_tui(
     workbook: Workbook,
     sheet_name: &str,
     config: &crate::config::Config,
-    horizontal_scroll: bool,
-    no_header: bool,
-    no_column_id: bool,
-    no_row_id: bool,
+    options: &TuiOptions,
 ) -> Result<()> {
     use std::io::IsTerminal;
     if !io::stdout().is_terminal() {
@@ -263,16 +261,7 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend).context("Failed to initialize terminal backend")?;
 
     // Create app state
-    let mut app = TuiState::new(
-        workbook,
-        sheet_name,
-        config,
-        themes,
-        horizontal_scroll,
-        no_header,
-        no_column_id,
-        no_row_id,
-    )?;
+    let mut app = TuiState::new(workbook, sheet_name, config, themes, options)?;
 
     // Main event loop
     run_event_loop(&mut terminal, &mut app)

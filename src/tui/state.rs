@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use super::TuiOptions;
 use super::clipboard::{self, CopyOutcome};
 use super::theme::ThemeSet;
 
@@ -180,19 +181,20 @@ impl TuiState {
     /// `themes` is resolved by the caller rather than here, so that config
     /// errors and warnings surface before the terminal enters the alternate
     /// screen.
-    // The parameter list is over clippy's limit; the next commit replaces the
-    // trailing flags with a `TuiOptions` struct.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mut workbook: Workbook,
         initial_sheet_name: &str,
         config: &crate::config::Config,
         themes: ThemeSet,
-        horizontal_scroll: bool,
-        no_header: bool,
-        no_column_id: bool,
-        no_row_id: bool,
+        options: &TuiOptions,
     ) -> Result<Self> {
+        let &TuiOptions {
+            horizontal_scroll,
+            no_header,
+            no_column_id,
+            no_row_id,
+        } = options;
+
         let sheet_names = workbook.sheet_names();
         let current_sheet_index = sheet_names
             .iter()
