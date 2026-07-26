@@ -115,7 +115,7 @@ fn parse_color(s: &str) -> Option<Color> {
         ));
     }
 
-    match s.to_lowercase().replace([' ', '_', '-'], "").as_str() {
+    match crate::utils::normalize_name(s).as_str() {
         "black" => Some(Color::Black),
         "red" => Some(Color::Red),
         "green" => Some(Color::Green),

@@ -10,42 +10,28 @@ use ratatui::style::Color;
 pub struct NamedTheme {
     pub name: String,
     pub colors: ColorScheme,
+    pub custom: bool,
 }
 
-/// Theme names are matched loosely, so `"Solarized Dark"`, `"solarized_dark"`,
-/// and `"solarizeddark"` all refer to the same theme.
-fn normalized(name: &str) -> String {
-    name.trim().to_lowercase().replace(' ', "")
-}
+use crate::utils::normalize_name;
 
 /// Returns the built-in themes in cycle order.
 pub fn builtin_themes() -> Vec<NamedTheme> {
-    vec![
-        NamedTheme {
-            name: "Default".into(),
-            colors: ColorScheme::default_theme(),
-        },
-        NamedTheme {
-            name: "Dracula".into(),
-            colors: ColorScheme::dracula(),
-        },
-        NamedTheme {
-            name: "Solarized Dark".into(),
-            colors: ColorScheme::solarized_dark(),
-        },
-        NamedTheme {
-            name: "Solarized Light".into(),
-            colors: ColorScheme::solarized_light(),
-        },
-        NamedTheme {
-            name: "GitHub Dark".into(),
-            colors: ColorScheme::github_dark(),
-        },
-        NamedTheme {
-            name: "Nord".into(),
-            colors: ColorScheme::nord(),
-        },
+    [
+        ("Default", ColorScheme::default_theme()),
+        ("Dracula", ColorScheme::dracula()),
+        ("Solarized Dark", ColorScheme::solarized_dark()),
+        ("Solarized Light", ColorScheme::solarized_light()),
+        ("GitHub Dark", ColorScheme::github_dark()),
+        ("Nord", ColorScheme::nord()),
     ]
+    .into_iter()
+    .map(|(name, colors)| NamedTheme {
+        name: name.into(),
+        colors,
+        custom: false,
+    })
+    .collect()
 }
 
 /// Every theme available this run, plus which one is active.
@@ -123,8 +109,10 @@ impl ThemeSet {
 
 /// Case- and space-insensitive lookup of a theme by name.
 fn find_index(themes: &[NamedTheme], name: &str) -> Option<usize> {
-    let needle = normalized(name);
-    themes.iter().position(|t| normalized(&t.name) == needle)
+    let needle = normalize_name(name);
+    themes
+        .iter()
+        .position(|t| normalize_name(&t.name) == needle)
 }
 
 /// Merge custom themes onto the built-ins.
@@ -140,10 +128,14 @@ pub fn resolve_themes(custom_themes: &[CustomTheme]) -> Result<Vec<NamedTheme>> 
     for custom in custom_themes {
         let colors = apply_custom_fields(resolve_base(&themes, custom)?, custom);
         match find_index(&themes, &custom.name) {
-            Some(idx) => themes[idx].colors = colors,
+            Some(idx) => {
+                themes[idx].colors = colors;
+                themes[idx].custom = true;
+            }
             None => themes.push(NamedTheme {
                 name: custom.name.clone(),
                 colors,
+                custom: true,
             }),
         }
     }
@@ -152,9 +144,16 @@ pub fn resolve_themes(custom_themes: &[CustomTheme]) -> Result<Vec<NamedTheme>> 
 }
 
 /// The scheme a custom theme starts from before its own fields are applied.
+///
+/// When `inherits` is absent, fall back to an existing theme with the same
+/// name so that `name = "Dracula"` + one field inherits the built-in Dracula
+/// palette rather than silently resetting every untouched field to Default.
 fn resolve_base(themes: &[NamedTheme], custom: &CustomTheme) -> Result<ColorScheme> {
     let Some(ref parent_name) = custom.inherits else {
-        return Ok(ColorScheme::default_theme());
+        return Ok(match find_index(themes, &custom.name) {
+            Some(idx) => themes[idx].colors.clone(),
+            None => ColorScheme::default_theme(),
+        });
     };
 
     let idx = find_index(themes, parent_name).ok_or_else(|| {
@@ -239,6 +238,30 @@ pub fn resolve_themes_from_config(
     override_name: Option<&str>,
 ) -> Result<(ThemeSet, Vec<String>)> {
     ThemeSet::resolve(config, override_name)
+}
+
+/// Check whether the active theme needs truecolor and warn if the terminal
+/// doesn't advertise it. Only fires for custom themes — every non-Default
+/// built-in uses `Color::Rgb`, so warning unconditionally would nag users
+/// who never touched their config.
+pub fn truecolor_warning(themes: &ThemeSet, colorterm: Option<&str>) -> Option<String> {
+    let theme = &themes.themes[themes.current];
+    if !theme.custom || !theme.colors.uses_rgb() {
+        return None;
+    }
+    match colorterm {
+        Some(v) if v.eq_ignore_ascii_case("truecolor") || v.eq_ignore_ascii_case("24bit") => None,
+        Some(v) => Some(format!(
+            "Theme '{}' uses RGB colors, but COLORTERM is '{}' (expected 'truecolor' or '24bit'). \
+             Colors may not display correctly.",
+            theme.name, v
+        )),
+        None => Some(format!(
+            "Theme '{}' uses RGB colors, but COLORTERM is not set. \
+             Colors may not display correctly.",
+            theme.name
+        )),
+    }
 }
 
 /// Color scheme for the TUI
@@ -472,6 +495,32 @@ impl ColorScheme {
         }
     }
 
+    /// Whether any field uses `Color::Rgb`, which requires 24-bit color support.
+    pub fn uses_rgb(&self) -> bool {
+        let all = [
+            self.string_fg,
+            self.number_fg,
+            self.bool_fg,
+            self.datetime_fg,
+            self.error_fg,
+            self.empty_fg,
+            self.header_fg,
+            self.current_cell_fg,
+            self.current_cell_bg,
+            self.current_row_bg,
+            self.current_col_fg,
+            self.search_match_fg,
+            self.search_match_bg,
+            self.current_search_fg,
+            self.current_search_bg,
+            self.border_fg,
+            self.status_bar_fg,
+        ];
+        let opts = [self.header_bg, self.alternating_row_bg, self.status_bar_bg];
+        all.iter().any(|c| matches!(c, Color::Rgb(..)))
+            || opts.iter().any(|o| matches!(o, Some(Color::Rgb(..))))
+    }
+
     /// Get foreground color for a cell based on its value type
     pub fn cell_color(&self, cell: &CellValue) -> Color {
         match cell {
@@ -599,6 +648,46 @@ mod tests {
             colors_of(&themes, "loose").number_fg,
             Color::Rgb(38, 139, 210),
             "'solarizeddark' should resolve to 'Solarized Dark'"
+        );
+    }
+
+    #[test]
+    fn override_without_inherits_falls_back_to_same_name() {
+        let themes = resolve_themes(&[CustomTheme {
+            string_fg: Some(Color::Green),
+            ..custom("Dracula")
+        }])
+        .unwrap();
+
+        let c = colors_of(&themes, "Dracula");
+        assert_eq!(c.string_fg, Color::Green, "explicit override applied");
+        assert_eq!(
+            c.number_fg,
+            Color::Rgb(189, 147, 249),
+            "number_fg should come from built-in Dracula, not Default"
+        );
+    }
+
+    #[test]
+    fn theme_names_match_with_hyphens_and_underscores() {
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("solarized-dark".into()),
+            ..custom("hyphen")
+        }])
+        .unwrap();
+        assert_eq!(
+            colors_of(&themes, "hyphen").number_fg,
+            Color::Rgb(38, 139, 210),
+        );
+
+        let themes = resolve_themes(&[CustomTheme {
+            inherits: Some("github_dark".into()),
+            ..custom("underscore")
+        }])
+        .unwrap();
+        assert_eq!(
+            colors_of(&themes, "underscore").number_fg,
+            Color::Rgb(121, 192, 255),
         );
     }
 
@@ -788,5 +877,82 @@ mod tests {
         assert_eq!(seen[BUILTIN_COUNT], "mine", "customs cycle after built-ins");
         set.cycle();
         assert_eq!(set.current_name(), "Default", "wraps around");
+    }
+
+    // =========================================================================
+    // Truecolor warning
+    // =========================================================================
+
+    #[test]
+    fn truecolor_warning_silent_for_builtins() {
+        let cfg = ThemeConfig {
+            default: "Nord".into(),
+            custom: Vec::new(),
+        };
+        let (set, _) = ThemeSet::resolve(&cfg, None).unwrap();
+        assert!(set.themes[set.current].colors.uses_rgb());
+        assert!(truecolor_warning(&set, None).is_none());
+    }
+
+    #[test]
+    fn truecolor_warning_fires_for_custom_with_rgb() {
+        let cfg = ThemeConfig {
+            default: "mine".into(),
+            custom: vec![CustomTheme {
+                inherits: Some("Nord".into()),
+                string_fg: Some(Color::Rgb(1, 2, 3)),
+                ..custom("mine")
+            }],
+        };
+        let (set, _) = ThemeSet::resolve(&cfg, None).unwrap();
+        let w = truecolor_warning(&set, None);
+        assert!(w.is_some(), "should warn");
+        assert!(w.as_ref().unwrap().contains("COLORTERM is not set"));
+    }
+
+    #[test]
+    fn truecolor_warning_silent_when_colorterm_is_truecolor() {
+        let cfg = ThemeConfig {
+            default: "mine".into(),
+            custom: vec![CustomTheme {
+                inherits: Some("Nord".into()),
+                ..custom("mine")
+            }],
+        };
+        let (set, _) = ThemeSet::resolve(&cfg, None).unwrap();
+        assert!(truecolor_warning(&set, Some("truecolor")).is_none());
+        assert!(truecolor_warning(&set, Some("24bit")).is_none());
+    }
+
+    #[test]
+    fn truecolor_warning_reports_actual_colorterm_value() {
+        let cfg = ThemeConfig {
+            default: "mine".into(),
+            custom: vec![CustomTheme {
+                inherits: Some("Nord".into()),
+                ..custom("mine")
+            }],
+        };
+        let (set, _) = ThemeSet::resolve(&cfg, None).unwrap();
+        let w = truecolor_warning(&set, Some("256color")).unwrap();
+        assert!(w.contains("256color"), "should report actual value: {w}");
+    }
+
+    // =========================================================================
+    // uses_rgb
+    // =========================================================================
+
+    #[test]
+    fn all_builtins_use_rgb() {
+        for t in builtin_themes() {
+            assert!(t.colors.uses_rgb(), "{} should use RGB", t.name);
+        }
+    }
+
+    #[test]
+    fn ansi_only_scheme_does_not_use_rgb() {
+        let mut c = ColorScheme::default_theme();
+        c.alternating_row_bg = None;
+        assert!(!c.uses_rgb());
     }
 }

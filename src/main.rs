@@ -182,6 +182,9 @@ fn main() -> Result<()> {
     for warning in &warnings {
         eprintln!("Warning: {warning}");
     }
+    if let Some(w) = tui::truecolor_warning(&themes, std::env::var("COLORTERM").ok().as_deref()) {
+        eprintln!("Warning: {w}");
+    }
 
     // Display, export, or run TUI
     if cli.interactive {

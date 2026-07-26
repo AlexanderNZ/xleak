@@ -6,6 +6,7 @@ mod theme;
 
 pub use event::run_tui;
 pub use theme::resolve_themes_from_config;
+pub use theme::truecolor_warning;
 
 /// Display options for a TUI session, all sourced from CLI flags.
 ///
