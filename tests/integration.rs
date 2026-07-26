@@ -654,3 +654,31 @@ fn test_extensionless_utf8_csv_detected() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// =========================================================================
+// --theme flag
+// =========================================================================
+
+#[test]
+fn test_theme_unknown_name_exits_nonzero() {
+    let fixture = format!("{FIXTURE_DIR}/test_comprehensive.xlsx");
+    let output = run_xleak(&[&fixture, "--theme", "nope"]);
+    assert!(!output.status.success(), "should fail for unknown theme");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Unknown theme"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Default"),
+        "should list available: {stderr}"
+    );
+}
+
+#[test]
+fn test_theme_valid_with_export_succeeds() {
+    let fixture = format!("{FIXTURE_DIR}/test_comprehensive.xlsx");
+    let output = run_xleak(&[&fixture, "--theme", "Nord", "--export", "csv"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

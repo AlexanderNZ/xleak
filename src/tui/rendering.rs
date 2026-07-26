@@ -680,7 +680,7 @@ impl TuiState {
             Line::from("  Cell colors vary by type and current theme:"),
             Line::from("  • Numbers, strings, dates, booleans, errors each have distinct colors"),
             Line::from("  • Alternating row backgrounds improve readability"),
-            Line::from("  • Press 't' to cycle through 6 built-in themes"),
+            Line::from("  • Press 't' to cycle through available themes"),
             Line::from(""),
             Line::from(Span::styled(
                 "STATUS BAR INFO",

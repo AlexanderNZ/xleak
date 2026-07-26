@@ -5,6 +5,7 @@ mod state;
 mod theme;
 
 pub use event::run_tui;
+pub use theme::resolve_themes_from_config;
 
 /// Display options for a TUI session, all sourced from CLI flags.
 ///
@@ -21,6 +22,8 @@ pub struct TuiOptions {
     pub no_column_id: bool,
     /// Hide the row-number column.
     pub no_row_id: bool,
+    /// Override the startup theme (`--theme`).
+    pub theme: Option<String>,
 }
 
 #[cfg(test)]

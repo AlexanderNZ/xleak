@@ -219,11 +219,15 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Run the TUI application
+/// Run the TUI application.
+///
+/// `themes` is resolved by the caller so that `--theme` errors and warnings
+/// surface before we enter raw mode (and identically in non-interactive mode).
 pub fn run_tui(
     workbook: Workbook,
     sheet_name: &str,
     config: &crate::config::Config,
+    themes: ThemeSet,
     options: &TuiOptions,
 ) -> Result<()> {
     use std::io::IsTerminal;
@@ -233,14 +237,6 @@ pub fn run_tui(
              Your output is redirected or not connected to a terminal.\n\
              Hint: Run this command directly in your terminal, not through pipes or automation."
         );
-    }
-
-    // Resolve themes before touching the terminal: a bad `inherits` should fail
-    // with a readable message, and warnings written after EnterAlternateScreen
-    // would be mangled by raw mode and then wiped by the first draw.
-    let (themes, warnings) = ThemeSet::resolve(&config.theme)?;
-    for warning in &warnings {
-        eprintln!("Warning: {warning}");
     }
 
     // Restore the terminal before the panic message prints, so it lands on a

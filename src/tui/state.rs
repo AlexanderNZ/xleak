@@ -193,6 +193,7 @@ impl TuiState {
             no_header,
             no_column_id,
             no_row_id,
+            ..
         } = options;
 
         let sheet_names = workbook.sheet_names();

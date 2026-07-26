@@ -61,26 +61,47 @@ pub struct ThemeSet {
 impl ThemeSet {
     /// Build the theme list from config and select the startup theme.
     ///
-    /// Fails only on an unresolvable `inherits`. An unknown `theme.default` is
-    /// recoverable, so it comes back as a warning string rather than an error —
-    /// callers print those *before* entering the alternate screen, where
-    /// stderr is still visible to the user.
-    pub fn resolve(config: &ThemeConfig) -> Result<(Self, Vec<String>)> {
+    /// When `override_name` is `Some`, it takes precedence over the config
+    /// default and is a **hard error** if not found (it came from `--theme`,
+    /// so the user explicitly asked for it). An unknown config default is
+    /// recoverable, so it comes back as a warning instead.
+    pub fn resolve(
+        config: &ThemeConfig,
+        override_name: Option<&str>,
+    ) -> Result<(Self, Vec<String>)> {
         let themes = resolve_themes(&config.custom)?;
         let mut warnings = Vec::new();
 
-        let current = match find_index(&themes, &config.default) {
+        let startup_name = override_name.unwrap_or(&config.default);
+
+        let current = match find_index(&themes, startup_name) {
             Some(idx) => idx,
+            None if override_name.is_some() => {
+                let available = Self::format_names(&themes);
+                anyhow::bail!(
+                    "Unknown theme '{}'. Available themes: {}",
+                    startup_name,
+                    available
+                );
+            }
             None => {
                 warnings.push(format!(
                     "theme '{}' not found, falling back to 'Default'",
-                    config.default
+                    startup_name
                 ));
                 0
             }
         };
 
         Ok((Self { themes, current }, warnings))
+    }
+
+    fn format_names(themes: &[NamedTheme]) -> String {
+        themes
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Colors for the active theme.
@@ -209,6 +230,15 @@ fn apply_custom_fields(mut colors: ColorScheme, custom: &CustomTheme) -> ColorSc
     apply_opt!(status_bar_bg);
 
     colors
+}
+
+/// Convenience wrapper for `main.rs`: resolve themes + select the startup
+/// theme, with `--theme` override support.
+pub fn resolve_themes_from_config(
+    config: &ThemeConfig,
+    override_name: Option<&str>,
+) -> Result<(ThemeSet, Vec<String>)> {
+    ThemeSet::resolve(config, override_name)
 }
 
 /// Color scheme for the TUI
@@ -686,7 +716,7 @@ mod tests {
             default: "nord".into(),
             custom: Vec::new(),
         };
-        let (set, warnings) = ThemeSet::resolve(&cfg).unwrap();
+        let (set, warnings) = ThemeSet::resolve(&cfg, None).unwrap();
         assert_eq!(set.current_name(), "Nord");
         assert!(warnings.is_empty());
     }
@@ -697,10 +727,46 @@ mod tests {
             default: "nope".into(),
             custom: Vec::new(),
         };
-        let (set, warnings) = ThemeSet::resolve(&cfg).unwrap();
+        let (set, warnings) = ThemeSet::resolve(&cfg, None).unwrap();
         assert_eq!(set.current_name(), "Default");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("nope"));
+    }
+
+    #[test]
+    fn override_selects_theme_by_name() {
+        let cfg = ThemeConfig {
+            default: "Default".into(),
+            custom: Vec::new(),
+        };
+        let (set, warnings) = ThemeSet::resolve(&cfg, Some("Dracula")).unwrap();
+        assert_eq!(set.current_name(), "Dracula");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn override_unknown_theme_is_a_hard_error() {
+        let cfg = ThemeConfig {
+            default: "Default".into(),
+            custom: Vec::new(),
+        };
+        let err = ThemeSet::resolve(&cfg, Some("nope")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown theme 'nope'"), "{msg}");
+        assert!(
+            msg.contains("Default"),
+            "should list available themes: {msg}"
+        );
+    }
+
+    #[test]
+    fn override_beats_config_default() {
+        let cfg = ThemeConfig {
+            default: "Nord".into(),
+            custom: Vec::new(),
+        };
+        let (set, _) = ThemeSet::resolve(&cfg, Some("Dracula")).unwrap();
+        assert_eq!(set.current_name(), "Dracula");
     }
 
     #[test]
@@ -709,7 +775,7 @@ mod tests {
             default: "Default".into(),
             custom: vec![custom("mine")],
         };
-        let (mut set, _) = ThemeSet::resolve(&cfg).unwrap();
+        let (mut set, _) = ThemeSet::resolve(&cfg, None).unwrap();
 
         let mut seen = vec![set.current_name().to_string()];
         for _ in 0..BUILTIN_COUNT {
